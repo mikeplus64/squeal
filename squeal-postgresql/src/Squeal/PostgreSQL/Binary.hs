@@ -178,9 +178,10 @@ import Network.IP.Addr
 
 import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString as Strict hiding (pack, unpack)
-import qualified Data.Text.Lazy as Lazy
+import qualified Data.Text.Lazy as LT
 import qualified Data.Text as Strict
 import qualified Data.Vector as Vector
+import qualified Data.Vector.Mutable as MutVector
 import qualified GHC.Generics as GHC
 import qualified PostgreSQL.Binary.Decoding as Decoding
 import qualified PostgreSQL.Binary.Encoding as Encoding
@@ -220,7 +221,8 @@ instance ToParam UUID 'PGuuid where toParam = K . Encoding.uuid
 instance ToParam (NetAddr IP) 'PGinet where toParam = K . Encoding.inet
 instance ToParam Char ('PGchar 1) where toParam = K . Encoding.char_utf8
 instance ToParam Strict.Text 'PGtext where toParam = K . Encoding.text_strict
-instance ToParam Lazy.Text 'PGtext where toParam = K . Encoding.text_lazy
+instance ToParam LT.Text 'PGtext where toParam = K . Encoding.text_lazy
+instance ToParam String 'PGtext where toParam = K . Encoding.text_lazy . LT.pack
 instance ToParam Strict.ByteString 'PGbytea where
   toParam = K . Encoding.bytea_strict
 instance ToParam Lazy.ByteString 'PGbytea where
@@ -236,12 +238,10 @@ instance ToParam UTCTime 'PGtimestamptz where
 instance ToParam DiffTime 'PGinterval where toParam = K . Encoding.interval_int
 instance ToParam Value 'PGjson where toParam = K . Encoding.json_ast
 instance ToParam Value 'PGjsonb where toParam = K . Encoding.jsonb_ast
-instance (HasOid pg, ToParam x pg)
-  => ToParam (Vector (Maybe x)) ('PGvararray pg) where
+instance {-# OVERLAPPING #-}
+  (HasOid pg, ToParam x pg) => ToParam (Vector (Maybe x)) ('PGvararray pg) where
     toParam = K . Encoding.nullableArray_vector
       (oid @pg) (unK . toParam @x @pg)
-
-data FromListN a = FromListN {-# UNPACK #-} !Int [a]
 
 type family Length (xs :: [k]) :: Nat where
   Length (x : xs) = 1 + Length xs
@@ -254,6 +254,7 @@ instance
   , code ~ Code c
   , code ~ '[list]
   , len ~ Length list
+  , KnownNat len
   , All ((~) x) list
   , SListI list
   , SListI code
@@ -262,18 +263,29 @@ instance
       (Encoding.array_vector
        (oid @pg)
        (unK . toParam @x @pg)
-       (case execState list (FromListN 0 []) of
-          FromListN n xs -> Vector.fromListN n xs))
+       (Vector.create $ do
+         m <- MutVector.new expectLen
+         finalLen <- hctraverse_
+           (Proxy :: Proxy ((~) list))
+           (hctraverse_ (Proxy :: Proxy ((~) x))
+            (\(I x) -> StateT $ \i -> do
+                MutVector.write m i x
+                return $! ((), i + 1)))
+           (unSOP (from c)) `execStateT` 0
+         when
+           (expectLen /= finalLen)
+           (error
+            ("toParam @'PGfixarray: vector with incorrect length\n\
+             \expected " ++ show expectLen ++ " but got " ++ show finalLen))
+         return m))
       where
-        sop :: NS (NP I) '[list]
-        sop = unSOP (from c)
+        expectLen :: Int
+        expectLen = fromIntegral (natVal (Proxy :: Proxy len))
 
-        list :: State (FromListN x) ()
-        list = htraverse_ (htraverse_ elem) sop
-
-        elem :: I x -> State (FromListN x) ()
-        elem (I x) =
-          modify' (\(FromListN n xs) -> FromListN (n+1) (x:xs))
+instance {-# OVERLAPPABLE #-}
+  (HasOid pg, ToParam x pg) => ToParam (Vector x) ('PGvararray pg) where
+    toParam = K . Encoding.array_vector
+      (oid @pg) (unK . toParam @x @pg)
 
 instance
   ( IsEnumType x
@@ -406,7 +418,8 @@ instance FromValue 'PGuuid UUID where fromValue _ = Decoding.uuid
 instance FromValue 'PGinet (NetAddr IP) where fromValue _ = Decoding.inet
 instance FromValue ('PGchar 1) Char where fromValue _ = Decoding.char
 instance FromValue 'PGtext Strict.Text where fromValue _ = Decoding.text_strict
-instance FromValue 'PGtext Lazy.Text where fromValue _ = Decoding.text_lazy
+instance FromValue 'PGtext LT.Text where fromValue _ = Decoding.text_lazy
+instance FromValue 'PGtext String where fromValue _ = fmap LT.unpack Decoding.text_lazy
 instance FromValue 'PGbytea Strict.ByteString where
   fromValue _ = Decoding.bytea_strict
 instance FromValue 'PGbytea Lazy.ByteString where
@@ -423,14 +436,57 @@ instance FromValue 'PGinterval DiffTime where
   fromValue _ = Decoding.interval_int
 instance FromValue 'PGjson Value where fromValue _ = Decoding.json_ast
 instance FromValue 'PGjsonb Value where fromValue _ = Decoding.jsonb_ast
-instance FromValue pg y => FromValue ('PGvararray pg) (Vector (Maybe y)) where
+instance {-# OVERLAPPING #-}
+  FromValue pg y => FromValue ('PGvararray pg) (Vector (Maybe y)) where
   fromValue _ = Decoding.array
     (Decoding.dimensionArray Vector.replicateM
       (Decoding.nullableValueArray (fromValue (Proxy @pg))))
+instance {-# OVERLAPPABLE #-}
+  FromValue pg y => FromValue ('PGvararray pg) (Vector y) where
+  fromValue _ = Decoding.array
+    (Decoding.dimensionArray Vector.replicateM
+      (Decoding.valueArray (fromValue (Proxy @pg))))
 instance FromValue pg y => FromValue ('PGfixarray n pg) (Vector (Maybe y)) where
   fromValue _ = Decoding.array
     (Decoding.dimensionArray Vector.replicateM
       (Decoding.nullableValueArray (fromValue (Proxy @pg))))
+
+class FromVector xs where
+  fromVector_ :: Int -> Vector a -> Maybe (NP (K a) xs)
+instance FromVector '[] where
+  {-# INLINE fromVector_ #-}
+  fromVector_ i v
+    | i == Vector.length v = Just Nil
+    | otherwise            = Nothing
+instance FromVector xs => FromVector (x : xs) where
+  {-# INLINE fromVector_ #-}
+  fromVector_ i v
+    | i < Vector.length v =
+      fmap
+      (\xs -> K (Vector.unsafeIndex v i) :* xs)
+      (fromVector_ (i + 1) v)
+    | otherwise = Nothing
+
+fromVector :: FromVector xs => Vector a -> Maybe (NP (K a) xs)
+fromVector = fromVector_ 0
+
+instance {-# OVERLAPPABLE #-}
+         ( FromVector xs
+         , FromValue pg a
+         , All ((~) a) xs
+         , Generic c
+         , Code c ~ '[xs]
+         ) => FromValue ('PGfixarray n pg) c where
+  {-# INLINE fromValue #-}
+  fromValue _ =
+    maybe (error "fromValue: invalid PGfixarray") ungeneric . fromVector <$>
+    Decoding.array
+    (Decoding.dimensionArray Vector.replicateM
+     (Decoding.valueArray (fromValue (Proxy @pg) :: Decoding.Value a)))
+    where
+      ungeneric :: NP (K a) xs -> c
+      ungeneric = to . SOP . Z . hcmap (Proxy :: Proxy ((~) a)) (I . unK)
+
 instance
   ( IsEnumType y
   , HasDatatypeInfo y
