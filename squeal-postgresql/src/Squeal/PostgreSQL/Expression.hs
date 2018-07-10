@@ -88,6 +88,8 @@ module Squeal.PostgreSQL.Expression
     -- ** json or jsonb operators
   , PGarray
   , PGarrayOf
+  , PGjsonKey
+  , PGjson
   , (.->)
   , (.->>)
   , (.#>)
@@ -902,8 +904,9 @@ json and jsonb operators
 see https://www.postgresql.org/docs/10/static/functions-json.html
 -----------------------------------------}
 
-type IsJSONKey key = key `In` '[ 'PGint2, 'PGint4, 'PGtext ]
-type IsJSON json = json `In` '[ 'PGjson, 'PGjsonb ]
+type PGjsonKey key = key `In` '[ 'PGint2, 'PGint4, 'PGtext ]
+
+type PGjson_ json = json `In` '[ 'PGjson, 'PGjsonb ]
 
 type Placeholder k
   =     'Text "(_"
@@ -937,7 +940,7 @@ type IsPGtextArray arr = PGarrayOf arr 'PGtext
 
 -- | Get JSON value (object field or array element) at a key.
 (.->)
-  :: (IsJSON json, IsJSONKey key)
+  :: (PGjson_ json, PGjsonKey key)
   => Expression schema relations grouping params (jnull json)
   -> Expression schema relations grouping params (knull key)
   -> Expression schema relations grouping params ('Null json)
@@ -945,7 +948,7 @@ type IsPGtextArray arr = PGarrayOf arr 'PGtext
 
 -- | Get JSON value (object field or array element) at a key, as text.
 (.->>)
-  :: (IsJSON json, IsJSONKey key)
+  :: (PGjson_ json, PGjsonKey key)
   => Expression schema relations grouping params (jnull json)
   -> Expression schema relations grouping params (knull key)
   -> Expression schema relations grouping params ('Null 'PGtext)
@@ -953,7 +956,7 @@ type IsPGtextArray arr = PGarrayOf arr 'PGtext
 
 -- | Get JSON value at a specified path.
 (.#>)
-  :: (IsJSON json, IsPGtextArray path)
+  :: (PGjson_ json, IsPGtextArray path)
   => Expression schema relations grouping params (jnull json)
   -> Expression schema relations grouping params (knull path)
   -> Expression schema relations grouping params ('Null json)
@@ -961,11 +964,11 @@ type IsPGtextArray arr = PGarrayOf arr 'PGtext
 
 -- | Get JSON value at a specified path as text.
 (.#>>)
-  :: (IsJSON json, IsPGtextArray path)
+  :: (PGjson_ json, IsPGtextArray path)
   => Expression schema relations grouping params (jnull json)
   -> Expression schema relations grouping params (knull path)
   -> Expression schema relations grouping params ('Null 'PGtext)
-(.#>>) = unsafeBinaryOp "#>"
+(.#>>) = unsafeBinaryOp "#>>"
 
 -- Additional jsonb operators
 
