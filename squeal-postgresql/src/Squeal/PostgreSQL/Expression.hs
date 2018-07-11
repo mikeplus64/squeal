@@ -842,8 +842,8 @@ localTimestamp = UnsafeExpression "LOCALTIMESTAMP"
 text
 -----------------------------------------}
 
-instance IsString
-  (Expression schema relations grouping params (nullity 'PGtext)) where
+instance val ~ nullity 'PGtext => IsString
+  (Expression schema relations grouping params val) where
     fromString str = UnsafeExpression $
       "E\'" <> fromString (escape =<< str) <> "\'"
       where
