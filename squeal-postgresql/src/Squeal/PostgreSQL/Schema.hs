@@ -692,7 +692,7 @@ instance MapMaybes xs => MapMaybes (x ': xs) where
 
 -- | `Nulls` is used to construct a `Squeal.Postgresql.Expression.row`
 -- of a composite type.
-type family Nulls tys where
+type family Nulls tys = x | x -> tys where
   Nulls '[] = '[]
   Nulls (field ::: ty ': tys) = field ::: 'Null ty ': Nulls tys
 
