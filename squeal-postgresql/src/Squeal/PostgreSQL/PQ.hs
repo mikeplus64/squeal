@@ -439,8 +439,12 @@ instance (MonadBase IO io, schema0 ~ schema, schema1 ~ schema)
             "traversePrepared: LibPQ.exec DEALLOCATE returned no results"
           Just deallocResult -> do
             status <- LibPQ.resultStatus deallocResult
-            unless (status == LibPQ.CommandOk) . error $
-              "traversePrepared: DEALLOCATE status " <> show status
+            unless (status == LibPQ.CommandOk) $ do
+              errmsg <- LibPQ.resultErrorMessage deallocResult
+              error $
+                "traversePrepared: DEALLOCATE status "
+                <> show status <> "\n"
+                <> show errmsg
         return (K results)
 
   traversePrepared_
